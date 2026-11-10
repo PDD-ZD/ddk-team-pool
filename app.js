@@ -144,7 +144,11 @@
 
   /* 对池子的所有修改都经过这里：读 → 改 → 存 → 刷新视图 */
   function mutate(fn, doneMsg) {
-    if (state.syncing) { toast("同步中，稍候再试", true); return; }
+    /* 同步进行中不拒绝操作，自动排队稍后执行 */
+    if (state.syncing) {
+      setTimeout(function () { mutate(fn, doneMsg); }, 500);
+      return;
+    }
     state.syncing = true;
     setStatus("syncing");
     fetchPool(function (err, remote) {
@@ -266,6 +270,24 @@
     updateSelectionBar();
   }
 
+  /* ================= 一键领取 ================= */
+  /* 自动领取最早发布的一条「非自己发的未使用码」：复制 → 标记已用 → 跳拼多多 */
+  function claimOne() {
+    var candidates = state.codes.filter(function (c) {
+      return !c.usedAt && myIds.indexOf(c.id) === -1;
+    });
+    if (!candidates.length) {
+      toast(state.codes.some(function (c) { return !c.usedAt; })
+        ? "剩下的都是你自己发的码，去让别人领吧～"
+        : "号码池暂无可领取的码，等别人发布后再来", true, 3200);
+      return;
+    }
+    candidates.sort(function (a, b) { return a.createdAt - b.createdAt; });
+    var target = candidates[0];
+    var rowEl = document.querySelector('.pool-item[data-id="' + target.id + '"]');
+    copyAndUse(target.id, rowEl);
+  }
+
   function makeBtn(text, cls, onClick) {
     var b = document.createElement("button");
     b.type = "button";
@@ -280,13 +302,12 @@
     var item = null;
     state.codes.forEach(function (c) { if (c.id === id) item = c; });
     if (!item || item.usedAt) return;
+    /* 跳转必须在点击的同步阶段发起（iOS Safari 对异步回调里的跳转有拦截），复制并行执行 */
+    openPddFlow();
     copyText(item.code, function (ok) {
-      if (ok) {
-        if (rowEl) rowEl.classList.add("flash");
-        openPddFlow();
-      }
-      markUsed([id], ok ? "已复制 " + item.code + (ok ? "，去拼多多粘贴吧" : "") : null, ok);
-      if (!ok) toast("复制失败，请长按/手动选择复制", true);
+      if (ok && rowEl) rowEl.classList.add("flash");
+      markUsed([id], ok ? "已复制 " + item.code + "，去拼多多粘贴吧" : null, ok);
+      if (!ok) toast("复制失败，请回到页面长按号码手动复制", true, 4000);
     });
   }
 
@@ -302,21 +323,36 @@
     }, msg || (copied ? "已复制" : "已标记为已使用"));
   }
 
-  /* 跳转拼多多：先试 App scheme，失败回落到网页版 */
+  /* 跳转拼多多：必须由用户点击直接触发导航，iframe 方式会被移动端浏览器拦截 */
   function openPddFlow() {
+    var ua = navigator.userAgent;
+    var inWeChat = /micromessenger/i.test(ua);
+    var isAndroid = /android/i.test(ua);
+    var isIOS = /iphone|ipad|ipod/i.test(ua);
+
+    if (inWeChat) {
+      toast("微信内无法直接跳转其他 App：点右上角「···」→「在浏览器打开」后再复制跳转", true, 5000);
+      return;
+    }
+
     var start = Date.now();
-    var w = null;
-    try { w = window.open("", "_blank"); } catch (e) {}
-    if (w) { try { w.close(); } catch (e) {} }
-    var iframe = document.createElement("iframe");
-    iframe.style.cssText = "display:none";
-    iframe.src = PDD_SCHEME;
-    document.body.appendChild(iframe);
-    setTimeout(function () { try { document.body.removeChild(iframe); } catch (e) {} }, 1500);
+    var url;
+    if (isAndroid) {
+      /* intent:// 带 fallback：未安装 App 时浏览器自动打开网页版 */
+      url = "intent://#Intent;scheme=pinduoduo;package=com.xunmeng.pinduoduo;S.browser_fallback_url=" +
+        encodeURIComponent(PDD_FALLBACK) + ";end";
+    } else {
+      /* iOS 及桌面：直接拉 scheme */
+      url = PDD_SCHEME;
+    }
+    try { window.location.href = url; } catch (e) {}
+
     setTimeout(function () {
-      if (document.hidden || Date.now() - start > 2200) return; // 已切到 App
-      toast("没检测到拼多多 App？可在浏览器打开 mobile.yangkeduo.com 粘贴口令", false, 4000);
-    }, 1800);
+      if (!document.hidden && Date.now() - start < 2500) {
+        toast(isIOS ? "没跳转？可能未安装拼多多 App，去 App Store 安装后重试，或打开 mobile.yangkeduo.com 粘贴口令"
+                    : "没跳转？可打开 mobile.yangkeduo.com 粘贴口令", false, 4500);
+      }
+    }, 2200);
   }
 
   /* ================= 选择与批量操作 ================= */
@@ -350,36 +386,70 @@
     markUsed(ids);
   }
 
-  /* ================= 发布 ================= */
+  /* ================= 发布（乐观更新：先上屏，后台静默同步） ================= */
+  var pending = [];   // 待同步到远端的条目
+
   function publish(code, doneMsg) {
     code = code.trim();
     if (!validCode(code)) {
       toast("组队码应为 6–12 位纯数字，请检查", true);
       return;
     }
-    var newId = uid();
-    var dup = state.codes.some(function (c) { return !c.usedAt && c.code === code; });
-    mutate(function (codes) {
-      codes.push({ id: newId, code: code, createdAt: Date.now(), usedAt: null });
-      return codes;
-    }, doneMsg || ("已发布 " + code));
+    var item = { id: uid(), code: code, createdAt: Date.now(), usedAt: null };
+    pending.push(item);
+    /* 本地立即置顶显示，不等网络 */
+    state.codes.push(item);
+    state.codes = prune(state.codes);
+    renderPool();
+    myIds.push(item.id);
+    saveMyIds();
+    toast(doneMsg || ("已发布 " + code + "，已置顶"));
+    var dup = state.codes.some(function (c) {
+      return c.id !== item.id && !c.usedAt && c.code === code;
+    });
     if (dup) {
       setTimeout(function () {
         toast("提示：池中已有相同的未使用码，重复发布不影响使用", true, 3600);
-      }, 600);
+      }, 1200);
     }
-    myIds.push(newId);
-    saveMyIds();
+    flushPending();
+  }
+
+  /* 把 pending 条目合并进远端池子（后台执行，不阻塞界面） */
+  function flushPending() {
+    if (state.syncing || !pending.length) return;
+    state.syncing = true;
+    setStatus("syncing");
+    fetchPool(function (err, remote) {
+      if (err) {
+        state.syncing = false;
+        setStatus("err");
+        setTimeout(flushPending, 4000);   // 稍后自动重试
+        return;
+      }
+      var have = {};
+      remote.forEach(function (c) { have[c.id] = true; });
+      var toAdd = pending.filter(function (p) { return !have[p.id]; });
+      pending = [];
+      var next = prune(remote.concat(toAdd));
+      savePool(next, function (err2) {
+        state.syncing = false;
+        if (err2) {
+          setStatus("err");
+          pending = toAdd;
+          setTimeout(flushPending, 4000); // 保存失败自动重试
+          return;
+        }
+        state.codes = next;
+        state.lastOkAt = Date.now();
+        setStatus("ok");
+        renderPool();
+      });
+    });
   }
 
   function republish(code) {
-    var newId = uid();
-    mutate(function (codes) {
-      codes.push({ id: newId, code: code, createdAt: Date.now(), usedAt: null });
-      return codes;
-    }, "已重新发布 " + code);
-    myIds.push(newId);
-    saveMyIds();
+    publish(code, "已重新发布 " + code);
   }
 
   /* ================= OCR 截图识别 ================= */
@@ -566,8 +636,9 @@
       }
     });
 
-    /* 刷新 */
+    /* 刷新 / 一键领取 */
     $("refreshBtn").addEventListener("click", function () { refresh(); });
+    $("claimBtn").addEventListener("click", claimOne);
 
     /* 批量操作 */
     $("selCopyBtn").addEventListener("click", selCopy);
@@ -616,6 +687,12 @@
         return;
       }
       state.codes = codes;
+      /* 刷新时保住尚未同步成功的本地发布，避免闪没 */
+      if (pending.length) {
+        var have = {};
+        codes.forEach(function (c) { have[c.id] = true; });
+        pending.forEach(function (p) { if (!have[p.id]) state.codes.push(p); });
+      }
       state.lastOkAt = Date.now();
       setStatus("ok");
       renderPool();
