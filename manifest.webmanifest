@@ -1,0 +1,16 @@
+{
+  "name": "多多福袋组队码互助池",
+  "short_name": "组队码互助",
+  "description": "发布/复制拼多多百亿补贴消费券福袋组队码的互助池",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f6f4f0",
+  "theme_color": "#e02e24",
+  "icons": [
+    { "src": "icons/icon-64.png",  "sizes": "64x64",   "type": "image/png" },
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
