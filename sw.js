@@ -1,7 +1,7 @@
 /* 组队码互助池 Service Worker
  * 应用壳缓存：css/js/图标 cache-first，页面 network-first，API 与跨域请求一律直连不缓存
  */
-var CACHE = "ddk-shell-v1";
+var CACHE = "ddk-shell-v2";
 var SHELL = [
   "./",
   "index.html",
@@ -49,16 +49,17 @@ self.addEventListener("fetch", function (e) {
     return;
   }
 
+  /* 应用壳资源：stale-while-revalidate —— 先回缓存保证秒开，同时后台拉新版供下次使用 */
   e.respondWith(
     caches.match(req).then(function (hit) {
-      if (hit) return hit;
-      return fetch(req).then(function (res) {
+      var fetching = fetch(req).then(function (res) {
         if (res.ok) {
           var copy = res.clone();
           caches.open(CACHE).then(function (c) { c.put(req, copy); });
         }
         return res;
-      });
+      }).catch(function () { return hit; });
+      return hit || fetching;
     })
   );
 });
