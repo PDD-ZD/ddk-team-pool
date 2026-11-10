@@ -1,12 +1,13 @@
 /* 多多福袋组队码互助池
- * 纯静态前端：号码池存于 restful-api.dev 公开 JSON 对象，截图识别用 Tesseract.js
+ * 纯静态前端：号码池存于 textdb.dev 免费文本 KV，截图识别用 Tesseract.js
  */
 (function () {
   "use strict";
 
   /* ================= 配置 ================= */
-  var STORE_ID = "ff808181a09d98f701a1c384acb177fe";
-  var API = "https://api.restful-api.dev/objects/" + STORE_ID;
+  /* 号码池存储：textdb.dev 免费文本 KV，GET 读 / POST 覆盖写，CORS 全开
+   * （原 restful-api.dev 已于 2026-11 变更策略强制鉴权，弃用） */
+  var API = "https://textdb.dev/api/data/ddk-team-pool-7f4e9b2c";
   var SHOW_LIMIT = 20;      // 池中最多展示条数
   var KEEP_LIMIT = 120;     // 远端最多保留条数（防膨胀）
   var POLL_MS = 15000;      // 自动刷新间隔
@@ -95,8 +96,9 @@
     xhr.onload = function () {
       if (xhr.status === 200) {
         try {
+          if (!xhr.responseText) { cb(null, []); return; } // 空池
           var body = JSON.parse(xhr.responseText);
-          var codes = (body && body.data && Array.isArray(body.data.codes)) ? body.data.codes : [];
+          var codes = (body && Array.isArray(body.codes)) ? body.codes : [];
           cb(null, codes);
         } catch (e) { cb(e); }
       } else { cb(new Error("HTTP " + xhr.status)); }
@@ -107,16 +109,14 @@
   }
 
   function savePool(codes, cb) {
-    var payload = JSON.stringify({
-      name: "ddk-pool",
-      data: { codes: codes, updatedAt: Date.now() }
-    });
+    var payload = JSON.stringify({ codes: codes, updatedAt: Date.now() });
     var attempt = 0;
     function run() {
       attempt++;
       var xhr = new XMLHttpRequest();
-      xhr.open("PUT", API, true);
-      xhr.setRequestHeader("Content-Type", "application/json");
+      xhr.open("POST", API, true);
+      /* text/plain：避免触发 CORS 预检，textdb 原样存文本 */
+      xhr.setRequestHeader("Content-Type", "text/plain");
       xhr.timeout = 12000;
       xhr.onload = function () {
         if (xhr.status >= 200 && xhr.status < 300) cb(null);

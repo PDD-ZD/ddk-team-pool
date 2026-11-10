@@ -1,7 +1,7 @@
 /* 组队码互助池 Service Worker
  * 应用壳缓存：css/js/图标 cache-first，页面 network-first，API 与跨域请求一律直连不缓存
  */
-var CACHE = "ddk-shell-v2";
+var CACHE = "ddk-shell-v3";
 var SHELL = [
   "./",
   "index.html",
